@@ -7,7 +7,7 @@ async function bootstrap() {
   
   // Enable CORS for your React app
   app.enableCors({
-    origin: 'http://localhost:5173', // Your React app URL
+    origin: 'https://uvo-project.vercel.app', // Your React app URL
     methods: 'POST',
     credentials: true,
   });
