@@ -14,30 +14,41 @@ export class ContactService {
   }
 
   private initializeTransporter() {
-    const port = parseInt(this.configService.get('SMTP_PORT') || '465');
-    const host = this.configService.get('SMTP_HOST') || 'smtp.gmail.com';
+    const port = parseInt(
+      this.configService.get<string>('SMTP_PORT') || '587',
+      10,
+    );
+
+    const host =
+      this.configService.get<string>('SMTP_HOST') || 'smtp.gmail.com';
+
+    const secure = port === 465;
 
     const smtpConfig = {
-      host: host,
-      port: 465, // Port 465 is for SSL/TLS
-      secure: true, // IMPORTANT: Must be true for port 465
+      host,
+      port,
+      secure,
+
       auth: {
-        user: this.configService.get('SMTP_USER'),
-        pass: this.configService.get('SMTP_PASSWORD'),
+        user: this.configService.get<string>('SMTP_USER'),
+        pass: this.configService.get<string>('SMTP_PASSWORD'),
       },
-      // Remove pool for now to debug
-      pool: false,
+
+      family: 4,
+
       connectionTimeout: 30000,
       greetingTimeout: 30000,
       socketTimeout: 30000,
-      // For port 465 with Gmail
+
       tls: {
-        rejectUnauthorized: true, // Keep true in production
-        ciphers: 'SSLv3',
-      }
+        rejectUnauthorized: true,
+      },
     };
 
-    this.logger.log(`SMTP Configuration: ${host}:${port} (secure: true)`);
+    this.logger.log(
+      `SMTP Configuration: ${host}:${port} (secure: ${secure}, IPv4)`,
+    );
+
     this.transporter = nodemailer.createTransport(smtpConfig);
   }
 
