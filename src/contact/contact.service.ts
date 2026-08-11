@@ -14,33 +14,37 @@ export class ContactService {
   }
 
   private initializeTransporter() {
-    const isSecure = this.configService.get('SMTP_SECURE') === 'true';
-    const port = parseInt(this.configService.get('SMTP_PORT') || (isSecure ? '465' : '587'));
+    const port = parseInt(this.configService.get('SMTP_PORT') || '465');
+    const host = this.configService.get('SMTP_HOST') || 'smtp.gmail.com';
 
-    const smtpConfig: any = {
-      host: this.configService.get('SMTP_HOST') || 'smtp.gmail.com',
-      port: port,
-      secure: isSecure,
-      pool: true,
-      maxConnections: 5,
-      maxMessages: 100,
+    const smtpConfig = {
+      host: host,
+      port: 465, // Port 465 is for SSL/TLS
+      secure: true, // IMPORTANT: Must be true for port 465
       auth: {
         user: this.configService.get('SMTP_USER'),
         pass: this.configService.get('SMTP_PASSWORD'),
       },
-      connectionTimeout: 20000, // 20 seconds
-      greetingTimeout: 20000,
-      socketTimeout: 20000,
+      // Remove pool for now to debug
+      pool: false,
+      connectionTimeout: 30000,
+      greetingTimeout: 30000,
+      socketTimeout: 30000,
+      // For port 465 with Gmail
+      tls: {
+        rejectUnauthorized: true, // Keep true in production
+        ciphers: 'SSLv3',
+      }
     };
 
-    this.logger.log(`SMTP Configuration: ${smtpConfig.host}:${smtpConfig.port} (secure: ${smtpConfig.secure}, pool: true)`);
+    this.logger.log(`SMTP Configuration: ${host}:${port} (secure: true)`);
     this.transporter = nodemailer.createTransport(smtpConfig);
   }
 
   async sendContactForm(data: ContactFormDto) {
     try {
       this.logger.log(`Processing contact form from ${data.email}`);
-      
+
       // Send emails sequentially over pooled transporter to prevent socket/connection timeouts
       let companyMessageId: string | null = null;
       let customerMessageId: string | null = null;
@@ -79,7 +83,7 @@ export class ContactService {
       };
     } catch (error) {
       this.logger.error(`Error sending contact form: ${error.message}`, error.stack);
-      
+
       // Don't throw an error to the user if email fails - log it and return partial success
       return {
         success: true,
