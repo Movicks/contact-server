@@ -7,7 +7,8 @@ async function bootstrap() {
   
   // Enable CORS for your React app
   app.enableCors({
-    origin: 'https://uvo-project.vercel.app', // Your React app URL
+    //origin: 'https://uvo-project.vercel.app', // Your React app URL
+    origin: 'https://uvorenewables.com',
     methods: 'POST',
     credentials: true,
   });
