@@ -14,25 +14,26 @@ export class ContactService {
   }
 
   private initializeTransporter() {
-    const smtpConfig = {
-      host: this.configService.get('SMTP_HOST'),
-      port: parseInt(this.configService.get('SMTP_PORT') || '587'),
-      secure: this.configService.get('SMTP_SECURE') === 'true',
+    const isSecure = this.configService.get('SMTP_SECURE') === 'true';
+    const port = parseInt(this.configService.get('SMTP_PORT') || (isSecure ? '465' : '587'));
+
+    const smtpConfig: any = {
+      host: this.configService.get('SMTP_HOST') || 'smtp.gmail.com',
+      port: port,
+      secure: isSecure,
+      pool: true,
+      maxConnections: 5,
+      maxMessages: 100,
       auth: {
         user: this.configService.get('SMTP_USER'),
         pass: this.configService.get('SMTP_PASSWORD'),
       },
-      family: 4, // Force IPv4
-      connectionTimeout: 30000, // 30 seconds
-      greetingTimeout: 30000,
-      socketTimeout: 30000,
-      // For Gmail specifically
-      // tls: {
-      //   rejectUnauthorized: false, // Only for testing, remove in production
-      // },
+      connectionTimeout: 20000, // 20 seconds
+      greetingTimeout: 20000,
+      socketTimeout: 20000,
     };
 
-    this.logger.log(`SMTP Configuration: ${smtpConfig.host}:${smtpConfig.port}`);
+    this.logger.log(`SMTP Configuration: ${smtpConfig.host}:${smtpConfig.port} (secure: ${smtpConfig.secure}, pool: true)`);
     this.transporter = nodemailer.createTransport(smtpConfig);
   }
 
@@ -40,29 +41,41 @@ export class ContactService {
     try {
       this.logger.log(`Processing contact form from ${data.email}`);
       
-      // Send both emails with proper error handling
-      const results = await Promise.allSettled([
-        this.sendCompanyNotification(data),
-        this.sendCustomerConfirmation(data),
-      ]);
+      // Send emails sequentially over pooled transporter to prevent socket/connection timeouts
+      let companyMessageId: string | null = null;
+      let customerMessageId: string | null = null;
+      let companyError: string | null = null;
+      let customerError: string | null = null;
 
-      // Check results
-      const companyResult = results[0];
-      const customerResult = results[1];
+      try {
+        companyMessageId = await this.sendCompanyNotification(data);
+      } catch (err) {
+        companyError = err.message;
+        this.logger.error(`Company notification error: ${err.message}`);
+      }
 
-      const success = companyResult.status === 'fulfilled' || customerResult.status === 'fulfilled';
-      
-      if (!success) {
-        throw new Error('Both emails failed to send');
+      try {
+        customerMessageId = await this.sendCustomerConfirmation(data);
+      } catch (err) {
+        customerError = err.message;
+        this.logger.error(`Customer confirmation error: ${err.message}`);
+      }
+
+      const companyEmailSent = !!companyMessageId;
+      const customerEmailSent = !!customerMessageId;
+
+      if (!companyEmailSent && !customerEmailSent) {
+        const errorMsg = `Both emails failed to send. Company: ${companyError || 'unknown'}, Customer: ${customerError || 'unknown'}`;
+        throw new Error(errorMsg);
       }
 
       return {
         success: true,
         message: 'Contact form submitted successfully',
-        companyEmailSent: companyResult.status === 'fulfilled',
-        customerEmailSent: customerResult.status === 'fulfilled',
-        companyMessageId: companyResult.status === 'fulfilled' ? companyResult.value : null,
-        customerMessageId: customerResult.status === 'fulfilled' ? customerResult.value : null,
+        companyEmailSent,
+        customerEmailSent,
+        companyMessageId,
+        customerMessageId,
       };
     } catch (error) {
       this.logger.error(`Error sending contact form: ${error.message}`, error.stack);
