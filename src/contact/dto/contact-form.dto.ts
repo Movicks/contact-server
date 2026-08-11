@@ -33,6 +33,11 @@ export class ContactFormDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(100)
+  country?: string;
+
+  @IsOptional()
+  @IsString()
   @MaxLength(20)
   systemSize?: string;
 

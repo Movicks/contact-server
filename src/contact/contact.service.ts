@@ -194,6 +194,10 @@ export class ContactService {
                 <span class="value">${this.escapeHtml(data.customerType || 'Not specified')}</span>
               </div>
               <div class="field">
+                <span class="label">Country:</span>
+                <span class="value">${this.escapeHtml(data.country || 'Not specified')}</span>
+              </div>
+              <div class="field">
                 <span class="label">State/City:</span>
                 <span class="value">${this.escapeHtml(data.state || 'Not specified')}</span>
               </div>
@@ -246,7 +250,8 @@ export class ContactService {
               
               <div class="details">
                 <strong>Requested System Size:</strong> ${this.escapeHtml(data.systemSize || 'Not specified')}<br/>
-                <strong>Project Type:</strong> ${this.escapeHtml(data.customerType || 'Not specified')}
+                <strong>Project Type:</strong> ${this.escapeHtml(data.customerType || 'Not specified')}<br/>
+                <strong>Country:</strong> ${this.escapeHtml(data.country || 'Not specified')}
               </div>
               
               <p>Our project desk team will review your requirements and get back to you with a comprehensive recommendation within 24-48 hours.</p>
