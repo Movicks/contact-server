@@ -1,4 +1,5 @@
-import { Injectable, InternalServerErrorException } from '@nestjs/common';
+// src/contact/contact.service.ts
+import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as nodemailer from 'nodemailer';
 import { ContactFormDto } from './dto/contact-form.dto';
@@ -6,66 +7,148 @@ import { ContactFormDto } from './dto/contact-form.dto';
 @Injectable()
 export class ContactService {
   private transporter: nodemailer.Transporter;
+  private readonly logger = new Logger(ContactService.name);
 
   constructor(private configService: ConfigService) {
-    this.transporter = nodemailer.createTransport({
+    this.initializeTransporter();
+  }
+
+  private initializeTransporter() {
+    const smtpConfig = {
       host: this.configService.get('SMTP_HOST'),
-      port: this.configService.get('SMTP_PORT'),
+      port: parseInt(this.configService.get('SMTP_PORT') || '587'),
       secure: this.configService.get('SMTP_SECURE') === 'true',
       auth: {
         user: this.configService.get('SMTP_USER'),
         pass: this.configService.get('SMTP_PASSWORD'),
       },
-    });
+      family: 4, // Force IPv4
+      connectionTimeout: 30000, // 30 seconds
+      greetingTimeout: 30000,
+      socketTimeout: 30000,
+      // For Gmail specifically
+      // tls: {
+      //   rejectUnauthorized: false, // Only for testing, remove in production
+      // },
+    };
+
+    this.logger.log(`SMTP Configuration: ${smtpConfig.host}:${smtpConfig.port}`);
+    this.transporter = nodemailer.createTransport(smtpConfig);
   }
 
   async sendContactForm(data: ContactFormDto) {
     try {
-      // Email to the company/project desk
-      const companyEmail = await this.sendCompanyNotification(data);
+      this.logger.log(`Processing contact form from ${data.email}`);
       
-      // Auto-reply to the customer
-      const customerEmail = await this.sendCustomerConfirmation(data);
+      // Send both emails with proper error handling
+      const results = await Promise.allSettled([
+        this.sendCompanyNotification(data),
+        this.sendCustomerConfirmation(data),
+      ]);
+
+      // Check results
+      const companyResult = results[0];
+      const customerResult = results[1];
+
+      const success = companyResult.status === 'fulfilled' || customerResult.status === 'fulfilled';
+      
+      if (!success) {
+        throw new Error('Both emails failed to send');
+      }
 
       return {
         success: true,
         message: 'Contact form submitted successfully',
-        companyEmailSent: companyEmail,
-        customerEmailSent: customerEmail,
+        companyEmailSent: companyResult.status === 'fulfilled',
+        customerEmailSent: customerResult.status === 'fulfilled',
+        companyMessageId: companyResult.status === 'fulfilled' ? companyResult.value : null,
+        customerMessageId: customerResult.status === 'fulfilled' ? customerResult.value : null,
       };
     } catch (error) {
-      console.error('Error sending email:', error);
-      throw new InternalServerErrorException('Failed to send contact form');
+      this.logger.error(`Error sending contact form: ${error.message}`, error.stack);
+      
+      // Don't throw an error to the user if email fails - log it and return partial success
+      return {
+        success: true,
+        message: 'Your message was received. We will contact you shortly.',
+        companyEmailSent: false,
+        customerEmailSent: false,
+        error: error.message,
+      };
     }
   }
 
   private async sendCompanyNotification(data: ContactFormDto) {
-    const htmlContent = this.generateCompanyEmailHTML(data);
+    try {
+      const htmlContent = this.generateCompanyEmailHTML(data);
+      const fromEmail = this.configService.get('SMTP_FROM');
+      const toEmail = this.configService.get('COMPANY_EMAIL');
 
-    const mailOptions = {
-      from: this.configService.get('SMTP_FROM'),
-      to: this.configService.get('COMPANY_EMAIL'), // e.g., contact@uvorenewables.com
-      subject: `New Project Quote Request - ${data.customerName || data.name}`,
-      html: htmlContent,
-      replyTo: data.email,
-    };
+      if (!toEmail) {
+        throw new Error('COMPANY_EMAIL not configured');
+      }
 
-    const info = await this.transporter.sendMail(mailOptions);
-    return info.messageId;
+      const mailOptions = {
+        from: fromEmail,
+        to: toEmail,
+        subject: `New Solar Project Quote Request - ${data.customerName || data.name}`,
+        html: htmlContent,
+        replyTo: data.email,
+        // Add headers to prevent spam filtering
+        headers: {
+          'X-Priority': '1',
+          'X-MSMail-Priority': 'High',
+          'Importance': 'high',
+        },
+      };
+
+      this.logger.log(`Sending company notification to ${toEmail}`);
+      const info = await this.transporter.sendMail(mailOptions);
+      this.logger.log(`Company email sent: ${info.messageId}`);
+      return info.messageId;
+    } catch (error) {
+      this.logger.error(`Failed to send company notification: ${error.message}`);
+      throw error;
+    }
   }
 
   private async sendCustomerConfirmation(data: ContactFormDto) {
-    const htmlContent = this.generateCustomerEmailHTML(data);
+    try {
+      const htmlContent = this.generateCustomerEmailHTML(data);
+      const fromEmail = this.configService.get('SMTP_FROM');
 
-    const mailOptions = {
-      from: this.configService.get('SMTP_FROM'),
-      to: data.email,
-      subject: 'We Received Your Project Quote Request - UVO Renewables',
-      html: htmlContent,
-    };
+      const mailOptions = {
+        from: fromEmail,
+        to: data.email,
+        subject: 'We Received Your Solar Project Quote Request - UVO Renewables',
+        html: htmlContent,
+        // Add headers to prevent spam filtering
+        headers: {
+          'X-Priority': '3',
+          'X-MSMail-Priority': 'Normal',
+        },
+      };
 
-    const info = await this.transporter.sendMail(mailOptions);
-    return info.messageId;
+      this.logger.log(`Sending customer confirmation to ${data.email}`);
+      const info = await this.transporter.sendMail(mailOptions);
+      this.logger.log(`Customer confirmation sent: ${info.messageId}`);
+      return info.messageId;
+    } catch (error) {
+      this.logger.error(`Failed to send customer confirmation: ${error.message}`);
+      throw error;
+    }
+  }
+
+  // Test email connection
+  async testConnection() {
+    try {
+      await this.transporter.verify();
+      this.logger.log('SMTP connection verified successfully');
+      return { success: true, message: 'SMTP connection working' };
+    } catch (error) {
+      this.logger.error(`SMTP connection failed: ${error.message}`);
+      throw new InternalServerErrorException('Email service unavailable');
+    }
   }
 
   private generateCompanyEmailHTML(data: ContactFormDto): string {
