@@ -1,89 +1,196 @@
 // src/contact/contact.service.ts
-import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Resend } from 'resend';
 import * as nodemailer from 'nodemailer';
-import * as dns from 'dns';
 import { ContactFormDto } from './dto/contact-form.dto';
+
+interface MailPayload {
+  from: string;
+  to: string;
+  subject: string;
+  html: string;
+  replyTo?: string;
+}
 
 @Injectable()
 export class ContactService {
-  private transporter: nodemailer.Transporter;
   private readonly logger = new Logger(ContactService.name);
+  private resend: Resend | null = null;
+  private smtpTransporter: nodemailer.Transporter | null = null;
+  private readonly fromEmail: string;
 
   constructor(private configService: ConfigService) {
-    this.initializeTransporter();
+    // Initialize Resend
+    const apiKey = this.configService.get<string>('RESEND_API_KEY');
+    this.fromEmail = this.configService.get<string>('RESEND_FROM') || 'contact@uvorenewables.com';
+    
+    if (apiKey) {
+      this.resend = new Resend(apiKey);
+      this.logger.log(`✅ Resend initialized with: ${this.fromEmail}`);
+    } else {
+      this.logger.warn('⚠️ RESEND_API_KEY not set');
+    }
+
+    // Initialize SMTP (Gmail) as fallback
+    this.initializeSMTP();
   }
 
-  private initializeTransporter() {
-    const host =
-      this.configService.get<string>('SMTP_HOST') || 'smtp.gmail.com';
+  private initializeSMTP() {
+    try {
+      const host = this.configService.get<string>('SMTP_HOST');
+      const user = this.configService.get<string>('SMTP_USER');
+      const pass = this.configService.get<string>('SMTP_PASSWORD');
 
-    // Port 587 uses STARTTLS — secure must be false, connection upgrades after handshake
-    // Custom lookup forces dns.resolve4 (A records only) so the SMTP socket
-    // never connects over IPv6 even on hosts where AAAA records resolve first.
-    const ipv4Lookup = (hostname: string, _opts: any, callback: Function) => {
-      dns.resolve4(hostname, (err, addresses) => {
-        if (err) return callback(err);
-        callback(null, addresses[0], 4);
+      if (!host || !user || !pass) {
+        this.logger.warn('⚠️ SMTP credentials not fully configured');
+        return;
+      }
+
+      this.smtpTransporter = nodemailer.createTransport({
+        host: host,
+        port: parseInt(this.configService.get<string>('SMTP_PORT') || '587'),
+        secure: this.configService.get<string>('SMTP_SECURE') === 'true',
+        auth: {
+          user: user,
+          pass: pass,
+        },
+        // Gmail specific settings
+        tls: {
+          rejectUnauthorized: false,
+        },
+        connectionTimeout: 30000,
+        greetingTimeout: 30000,
+        socketTimeout: 30000,
       });
-    };
 
-    const smtpConfig: any = {
-      host,
-      port: 587,
-      secure: false, // false = STARTTLS on port 587 (NOT SSL — that's port 465)
-
-      auth: {
-        user: this.configService.get<string>('SMTP_USER'),
-        pass: this.configService.get<string>('SMTP_PASSWORD'),
-      },
-
-      lookup: ipv4Lookup,
-
-      connectionTimeout: 30000,
-      greetingTimeout: 30000,
-      socketTimeout: 30000,
-
-      tls: {
-        rejectUnauthorized: true,
-      },
-    };
-
-    this.logger.log(`SMTP Configuration: ${host}:587 (STARTTLS, IPv4)`);
-
-    this.transporter = nodemailer.createTransport(smtpConfig);
+      this.logger.log(`✅ SMTP fallback initialized with: ${host}`);
+    } catch (error) {
+      this.logger.error(`❌ Failed to initialize SMTP: ${error.message}`);
+    }
   }
+
+  // ─── Primary send logic ───────────────────────────────────────────────────
+
+  private async sendEmail(payload: MailPayload): Promise<string> {
+    // Try Resend first
+    if (this.resend) {
+      try {
+        return await this.sendViaResend(payload);
+      } catch (err) {
+        this.logger.warn(`⚠️ Resend failed (${err.message}), falling back to SMTP`);
+      }
+    }
+
+    // Fallback to SMTP (Gmail)
+    if (this.smtpTransporter) {
+      try {
+        return await this.sendViaSMTP(payload);
+      } catch (err) {
+        this.logger.error(`❌ SMTP fallback also failed: ${err.message}`);
+        throw new Error(`Both Resend and SMTP failed: ${err.message}`);
+      }
+    }
+
+    throw new Error('No email providers available (Resend and SMTP both unavailable)');
+  }
+
+  // ─── Resend provider ─────────────────────────────────────────────────────
+
+  private async sendViaResend(payload: MailPayload): Promise<string> {
+    const { data, error } = await this.resend!.emails.send({
+      from: this.fromEmail,
+      to: [payload.to],
+      subject: payload.subject,
+      html: payload.html,
+      ...(payload.replyTo ? { replyTo: payload.replyTo } : {}),
+    });
+
+    if (error) {
+      throw new Error(`Resend error: ${error.message}`);
+    }
+
+    this.logger.log(`✅ Resend sent: ${data?.id} to ${payload.to}`);
+    return data?.id ?? 'resend-ok';
+  }
+
+  // ─── SMTP (Gmail) fallback ──────────────────────────────────────────────
+
+  private async sendViaSMTP(payload: MailPayload): Promise<string> {
+    if (!this.smtpTransporter) {
+      throw new Error('SMTP transporter not initialized');
+    }
+
+    const from = this.configService.get<string>('SMTP_FROM') || this.configService.get<string>('SMTP_USER');
+
+    const info = await this.smtpTransporter.sendMail({
+      from: from,
+      to: payload.to,
+      subject: payload.subject,
+      html: payload.html,
+      ...(payload.replyTo ? { replyTo: payload.replyTo } : {}),
+    });
+
+    this.logger.log(`✅ SMTP fallback sent: ${info.messageId} to ${payload.to}`);
+    return info.messageId;
+  }
+
+  // ─── Public API ───────────────────────────────────────────────────────────
 
   async sendContactForm(data: ContactFormDto) {
     try {
-      this.logger.log(`Processing contact form from ${data.email}`);
+      this.logger.log(`📩 Processing contact form from ${data.email}`);
 
-      // Send emails sequentially over pooled transporter to prevent socket/connection timeouts
+      const toEmail = this.configService.get<string>('COMPANY_EMAIL');
+
+      if (!toEmail) {
+        throw new Error('COMPANY_EMAIL not configured');
+      }
+
       let companyMessageId: string | null = null;
       let customerMessageId: string | null = null;
       let companyError: string | null = null;
       let customerError: string | null = null;
+      let usedFallback = false;
 
+      // Company notification
       try {
-        companyMessageId = await this.sendCompanyNotification(data);
+        companyMessageId = await this.sendEmail({
+          from: this.fromEmail,
+          to: toEmail,
+          subject: `New Solar Project Quote Request - ${data.customerName || data.name}`,
+          html: this.generateCompanyEmailHTML(data),
+          replyTo: data.email,
+        });
+        this.logger.log(`✅ Company notification sent: ${companyMessageId}`);
       } catch (err) {
         companyError = err.message;
-        this.logger.error(`Company notification error: ${err.message}`);
+        this.logger.error(`❌ Company notification error: ${err.message}`);
+        usedFallback = true;
       }
 
+      // Customer confirmation
       try {
-        customerMessageId = await this.sendCustomerConfirmation(data);
+        customerMessageId = await this.sendEmail({
+          from: this.fromEmail,
+          to: data.email,
+          subject: 'We Received Your Solar Project Quote Request - UVO Renewables',
+          html: this.generateCustomerEmailHTML(data),
+        });
+        this.logger.log(`✅ Customer confirmation sent: ${customerMessageId}`);
       } catch (err) {
         customerError = err.message;
-        this.logger.error(`Customer confirmation error: ${err.message}`);
+        this.logger.error(`❌ Customer confirmation error: ${err.message}`);
+        usedFallback = true;
       }
 
       const companyEmailSent = !!companyMessageId;
       const customerEmailSent = !!customerMessageId;
 
       if (!companyEmailSent && !customerEmailSent) {
-        const errorMsg = `Both emails failed to send. Company: ${companyError || 'unknown'}, Customer: ${customerError || 'unknown'}`;
-        throw new Error(errorMsg);
+        throw new Error(
+          `Both emails failed. Company: ${companyError || 'unknown'}, Customer: ${customerError || 'unknown'}`,
+        );
       }
 
       return {
@@ -93,11 +200,10 @@ export class ContactService {
         customerEmailSent,
         companyMessageId,
         customerMessageId,
+        usedFallback, // Indicates if fallback was used
       };
     } catch (error) {
-      this.logger.error(`Error sending contact form: ${error.message}`, error.stack);
-
-      // Return success: false so the frontend can display the error
+      this.logger.error(`❌ Error sending contact form: ${error.message}`, error.stack);
       return {
         success: false,
         message: 'Failed to send your message. Please try again or contact us directly.',
@@ -108,78 +214,71 @@ export class ContactService {
     }
   }
 
-  private async sendCompanyNotification(data: ContactFormDto) {
-    try {
-      const htmlContent = this.generateCompanyEmailHTML(data);
-      const fromEmail = this.configService.get('SMTP_FROM');
-      const toEmail = this.configService.get('COMPANY_EMAIL');
-
-      if (!toEmail) {
-        throw new Error('COMPANY_EMAIL not configured');
-      }
-
-      const mailOptions = {
-        from: fromEmail,
-        to: toEmail,
-        subject: `New Solar Project Quote Request - ${data.customerName || data.name}`,
-        html: htmlContent,
-        replyTo: data.email,
-        // Add headers to prevent spam filtering
-        headers: {
-          'X-Priority': '1',
-          'X-MSMail-Priority': 'High',
-          'Importance': 'high',
-        },
-      };
-
-      this.logger.log(`Sending company notification to ${toEmail}`);
-      const info = await this.transporter.sendMail(mailOptions);
-      this.logger.log(`Company email sent: ${info.messageId}`);
-      return info.messageId;
-    } catch (error) {
-      this.logger.error(`Failed to send company notification: ${error.message}`);
-      throw error;
-    }
-  }
-
-  private async sendCustomerConfirmation(data: ContactFormDto) {
-    try {
-      const htmlContent = this.generateCustomerEmailHTML(data);
-      const fromEmail = this.configService.get('SMTP_FROM');
-
-      const mailOptions = {
-        from: fromEmail,
-        to: data.email,
-        subject: 'We Received Your Solar Project Quote Request - UVO Renewables',
-        html: htmlContent,
-        // Add headers to prevent spam filtering
-        headers: {
-          'X-Priority': '3',
-          'X-MSMail-Priority': 'Normal',
-        },
-      };
-
-      this.logger.log(`Sending customer confirmation to ${data.email}`);
-      const info = await this.transporter.sendMail(mailOptions);
-      this.logger.log(`Customer confirmation sent: ${info.messageId}`);
-      return info.messageId;
-    } catch (error) {
-      this.logger.error(`Failed to send customer confirmation: ${error.message}`);
-      throw error;
-    }
-  }
-
-  // Test email connection
+  // Test connection — tests both Resend and SMTP
   async testConnection() {
-    try {
-      await this.transporter.verify();
-      this.logger.log('SMTP connection verified successfully');
-      return { success: true, message: 'SMTP connection working' };
-    } catch (error) {
-      this.logger.error(`SMTP connection failed: ${error.message}`);
-      throw new InternalServerErrorException('Email service unavailable');
+    const results = {
+      resend: { success: false, message: '' },
+      smtp: { success: false, message: '' },
+    };
+
+    // Test Resend
+    if (this.resend) {
+      try {
+        const testEmail = this.configService.get<string>('COMPANY_EMAIL');
+        if (testEmail) {
+          const { data, error } = await this.resend.emails.send({
+            from: this.fromEmail,
+            to: [testEmail],
+            subject: '✅ UVO Renewables - Resend Test',
+            html: `
+              <h1>Resend Test Successful ✅</h1>
+              <p>Your Resend integration is working correctly with: <strong>${this.fromEmail}</strong></p>
+              <p>Sent at: ${new Date().toLocaleString()}</p>
+            `,
+          });
+
+          if (error) {
+            results.resend = { success: false, message: error.message };
+          } else {
+            results.resend = { success: true, message: `Test email sent: ${data?.id}` };
+          }
+        } else {
+          results.resend = { success: false, message: 'No test email configured (set COMPANY_EMAIL)' };
+        }
+      } catch (error) {
+        results.resend = { success: false, message: error.message };
+      }
+    } else {
+      results.resend = { success: false, message: 'RESEND_API_KEY not configured' };
     }
+
+    // Test SMTP
+    if (this.smtpTransporter) {
+      try {
+        await this.smtpTransporter.verify();
+        results.smtp = { success: true, message: 'SMTP connection verified' };
+      } catch (error) {
+        results.smtp = { success: false, message: error.message };
+      }
+    } else {
+      results.smtp = { success: false, message: 'SMTP not configured' };
+    }
+
+    const allWorking = results.resend.success || results.smtp.success;
+    
+    this.logger.log(`Test results: Resend=${results.resend.success}, SMTP=${results.smtp.success}`);
+    
+    return {
+      success: allWorking,
+      providers: results,
+      primaryProvider: this.resend ? 'resend' : 'smtp',
+      message: allWorking 
+        ? 'At least one email provider is working' 
+        : 'No email providers are working',
+    };
   }
+
+  // ─── Email templates ──────────────────────────────────────────────────────
 
   private generateCompanyEmailHTML(data: ContactFormDto): string {
     return `
@@ -314,10 +413,10 @@ export class ContactService {
   private escapeHtml(unsafe: string): string {
     if (!unsafe) return '';
     return unsafe
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#039;");
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
   }
 }
