@@ -2,6 +2,7 @@
 import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as nodemailer from 'nodemailer';
+import * as dns from 'dns';
 import { ContactFormDto } from './dto/contact-form.dto';
 
 @Injectable()
@@ -24,7 +25,16 @@ export class ContactService {
 
     const secure = port === 465;
 
-    const smtpConfig = {
+    // Custom lookup forces dns.resolve4 (A records only) so the SMTP socket
+    // never connects over IPv6 even on hosts where AAAA records resolve first.
+    const ipv4Lookup = (hostname: string, _opts: any, callback: Function) => {
+      dns.resolve4(hostname, (err, addresses) => {
+        if (err) return callback(err);
+        callback(null, addresses[0], 4);
+      });
+    };
+
+    const smtpConfig: any = {
       host,
       port,
       secure,
@@ -34,7 +44,7 @@ export class ContactService {
         pass: this.configService.get<string>('SMTP_PASSWORD'),
       },
 
-      family: 4,
+      lookup: ipv4Lookup,
 
       connectionTimeout: 30000,
       greetingTimeout: 30000,
@@ -95,10 +105,10 @@ export class ContactService {
     } catch (error) {
       this.logger.error(`Error sending contact form: ${error.message}`, error.stack);
 
-      // Don't throw an error to the user if email fails - log it and return partial success
+      // Return success: false so the frontend can display the error
       return {
-        success: true,
-        message: 'Your message was received. We will contact you shortly.',
+        success: false,
+        message: 'Failed to send your message. Please try again or contact us directly.',
         companyEmailSent: false,
         customerEmailSent: false,
         error: error.message,
