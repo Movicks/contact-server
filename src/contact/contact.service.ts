@@ -15,16 +15,10 @@ export class ContactService {
   }
 
   private initializeTransporter() {
-    const port = parseInt(
-      this.configService.get<string>('SMTP_PORT') || '587',
-      10,
-    );
-
     const host =
       this.configService.get<string>('SMTP_HOST') || 'smtp.gmail.com';
 
-    const secure = port === 465;
-
+    // Port 587 uses STARTTLS — secure must be false, connection upgrades after handshake
     // Custom lookup forces dns.resolve4 (A records only) so the SMTP socket
     // never connects over IPv6 even on hosts where AAAA records resolve first.
     const ipv4Lookup = (hostname: string, _opts: any, callback: Function) => {
@@ -36,8 +30,8 @@ export class ContactService {
 
     const smtpConfig: any = {
       host,
-      port,
-      secure,
+      port: 587,
+      secure: false, // false = STARTTLS on port 587 (NOT SSL — that's port 465)
 
       auth: {
         user: this.configService.get<string>('SMTP_USER'),
@@ -55,9 +49,7 @@ export class ContactService {
       },
     };
 
-    this.logger.log(
-      `SMTP Configuration: ${host}:${port} (secure: ${secure}, IPv4)`,
-    );
+    this.logger.log(`SMTP Configuration: ${host}:587 (STARTTLS, IPv4)`);
 
     this.transporter = nodemailer.createTransport(smtpConfig);
   }
